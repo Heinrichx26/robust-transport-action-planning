@@ -1,0 +1,3 @@
+dataset,fold_id,train_rows,mechanism_tuning_rows,representation_validation_rows,set_cal_rows,test_rows,scenario_count,response_rank,joint_scenario_correction,selected_candidates,negative_scenario_values,scenario_above_loss,area_cap_share,temporal_loss_weight,network_loss_weight,group_penalty,downside_penalty
+bts,1,60000,14217,15783,30000,30000,4,4,3.192338686673076,1:direct;3:proxy_RobustImprovement2025;5:direct;10:direct;20:direct_0.50_CalibratedUncertainty2025,0.0,0.0,0.4,0.75,0.75,0.25,0.1
+bts,2,60000,15014,14986,30000,30000,4,4,2.878336398098646,1:direct_0.50_TemporalContext2024;3:direct_0.50_NetworkPropagation2024;5:proxy_NetworkPropagation2024;10:proxy_NetworkPropagation2024;20:direct_0.50_CalibratedUncertainty2025,0.0,0.0,0.4,0.75,0.75,0.1,0.1

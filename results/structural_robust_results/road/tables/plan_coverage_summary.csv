@@ -1,0 +1,6 @@
+dataset,budget_fraction,coverage,blocks
+road,0.01,0.9555555555555556,45
+road,0.03,1.0,45
+road,0.05,0.9777777777777777,45
+road,0.1,0.9777777777777777,45
+road,0.2,1.0,45
