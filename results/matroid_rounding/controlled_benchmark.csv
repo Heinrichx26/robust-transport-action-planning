@@ -1,0 +1,4 @@
+modules,candidate_count,setting_count,action_limit,fractional_coordinates,lp_value,exact_value,lp_gap_percent,mean_rounded_value,minimum_rounded_value,mean_retained_percent,max_marginal_error,feasibility_violations,lp_seconds,exact_verification_seconds,rounding_seconds_per_draw,rounding_repeats
+10,30,20,20,20,9.0,4.0,125.0,4.0,4.0,100.0,0.12,0,0.002569799999037059,,0.00017314699998678408,200
+50,150,100,100,100,9.0,4.0,125.0,4.0,4.0,100.0,0.09000000000000002,0,0.002377400000113994,,0.0006599419999838574,200
+200,600,400,400,400,8.999999999999998,4.0,124.99999999999996,4.0,4.0,100.0,0.09999999999999998,0,0.009524999997665873,,0.004439261000006809,200

@@ -1,3 +1,3 @@
-dataset,fold_id,train_rows,mechanism_tuning_rows,representation_validation_rows,set_cal_rows,test_rows,scenario_count,response_rank,joint_scenario_correction,selected_candidates,negative_scenario_values,scenario_above_loss,area_cap_share,temporal_loss_weight,network_loss_weight,group_penalty,downside_penalty
-divvy,1,60000,15089,14911,30000,30000,4,4,0.08117700599116288,1:direct;3:direct_0.50_RiskFirst;5:direct;10:proxy_CalibratedUncertainty2025;20:proxy_CalibratedUncertainty2025,0.0,0.0,0.4,0.75,0.75,0.1,0.1
-divvy,2,60000,14295,15705,30000,30000,4,4,0.15471521468336927,1:proxy_RobustImprovement2025;3:direct;5:direct;10:direct;20:proxy_MappedPTO2026,0.0,0.0,0.4,0.75,0.75,0.1,0.1
+dataset,fold_id,train_rows,mechanism_tuning_rows,representation_validation_rows,set_cal_rows,test_rows,scenario_count,response_rank,joint_scenario_correction,contamination_share,selected_candidates,negative_scenario_values,scenario_above_loss,area_cap_share,temporal_loss_weight,network_loss_weight,group_penalty,downside_penalty
+divvy,1,60000,15166,14834,30000,30000,4,4,0.013450900606676116,0.2,1:direct;3:direct;5:direct;10:direct;20:direct,0.0,0.0,0.4,0.75,0.75,0.1,0.1
+divvy,2,60000,14246,15754,30000,30000,4,4,0.02694897007949241,0.2,1:direct;3:direct;5:direct;10:direct;20:direct,0.0,0.0,0.4,0.75,0.75,0.1,0.1

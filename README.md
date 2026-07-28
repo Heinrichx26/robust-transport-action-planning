@@ -14,7 +14,7 @@ Source transportation records remain with their public providers:
 
 - United States Bureau of Transportation Statistics Airline On-Time Performance data;
 - METR-LA freeway-speed data for Los Angeles;
-- Divvy public trip data for Chicago.
+- Divvy public trip data and City of Chicago station dock counts.
 
 ## Environment
 
@@ -33,21 +33,22 @@ Each preparation program lists its source and output arguments through `--help`.
 python src/ccerts/prepare_bts.py --help
 python src/ccerts/prepare_road.py --help
 python src/ccerts/prepare_divvy.py --help
+python src/methodology/build_divvy_official_capacity.py --help
 ```
 
-Place source records under `data/open/bts`, `data/open/road`, and `data/open/divvy`, or pass another location through the documented arguments.
+Place source records under `data/open/bts`, `data/open/road`, and `data/open/divvy`, or pass another location through the documented arguments. Download the official Divvy station file from `https://data.cityofchicago.org/d/bbyy-e7gq` and pass its JSON path to `build_divvy_official_capacity.py`.
 
 ## Smoke tests
 
 Check the grouped robust-rounding construction on a small instance:
 
 ~~~bash
-python src/methodology/test_matroid_rounding_smoke.py
+python src/methodology/test_pipage_rounding_smoke.py
 ~~~
 
-The check solves a fractional robust plan, decomposes it into feasible integer
-plans, verifies every total and area limit, and compares sampled plan values
-with the enumerated integer optimum.
+The check solves a fractional robust plan, applies randomized pipage rounding,
+verifies every total and area limit, checks coordinate marginals, and compares
+sampled plan values with the exact integer optimum.
 
 Run one ordered fold with at most 2,500 records per period before a full analysis:
 
@@ -84,7 +85,7 @@ python src/methodology/run_structural_robust.py --dataset road \
   --output-dir results/structural_robust_results
 
 python src/methodology/run_structural_robust.py --dataset divvy \
-  --input data/open/divvy/ccerts_divvy_ready.csv \
+  --input data/open/divvy/ccerts_divvy_official_capacity.csv \
   --output-dir results/structural_robust_results
 ```
 
@@ -109,6 +110,18 @@ python src/methodology/plot_final.py \
 ```
 
 The plotting command reads stored tables and performs no model fitting.
+
+The scalable matroid algorithm has separate transport and controlled benchmarks:
+
+```bash
+python src/methodology/benchmark_matroid_rounding.py \
+  --output results/matroid_rounding/transport_benchmark.csv
+
+python src/methodology/benchmark_matroid_rounding_stress.py \
+  --output results/matroid_rounding/controlled_benchmark.csv
+```
+
+Both scripts read prepared inputs and perform no rolling model fitting.
 
 ## Reproducibility notes
 
