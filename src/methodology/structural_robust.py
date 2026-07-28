@@ -38,6 +38,16 @@ class AnchoredPlanSolution:
     gap: float
 
 
+@dataclass(frozen=True)
+class FrontierPoint:
+    """Best protected improvement for an exact number of changed actions."""
+
+    changed_actions: int
+    protected_improvement: float
+    selected: np.ndarray
+    feasible: bool
+
+
 def scenario_gain_matrix(dataset: str, frame: pd.DataFrame) -> tuple[tuple[str, ...], np.ndarray]:
     """Return loss reductions under every predeclared structural setting."""
     loss = _num(frame, "loss")
@@ -348,6 +358,113 @@ def anchored_robust_plan_select(
     return AnchoredPlanSolution(
         baseline.copy(), baseline, 0.0, 0, True, "feasible baseline fallback", np.nan
     )
+
+
+def anchored_change_frontier(
+    scenario_values: np.ndarray,
+    baseline: np.ndarray,
+    budget: int,
+    *,
+    groups: np.ndarray | None = None,
+    group_cap: int | None = None,
+) -> list[FrontierPoint]:
+    """Compute the exact protected-improvement frontier by change count.
+
+    For each feasible change count ``c`` in ``0,...,2*budget``, this routine
+    solves the paired maximin problem with the additional equality ``C(x,b)=c``.
+    The regularised certificate for any discrepancy penalty is the upper envelope
+    of the returned affine values ``protected_improvement - penalty*c``.
+    """
+    values = np.maximum(np.asarray(scenario_values, dtype=float), 0.0)
+    n, scenario_count = values.shape
+    baseline = np.unique(np.asarray(baseline, dtype=int))
+    k = min(max(int(budget), 0), n)
+    if np.any((baseline < 0) | (baseline >= n)) or len(baseline) > k:
+        raise ValueError("The baseline must be a feasible index set within the action budget.")
+    if groups is not None and group_cap is not None:
+        group_array = np.asarray(groups)
+        if len(baseline) and int(pd.Series(group_array[baseline]).value_counts().max()) > int(group_cap):
+            raise ValueError("The baseline plan exceeds a group limit.")
+
+    baseline_totals = values[baseline].sum(axis=0) if len(baseline) else np.zeros(scenario_count)
+    points: list[FrontierPoint] = []
+    for change_count in range(0, 2 * k + 1):
+        selected, improvement, feasible = _solve_exact_change_count(
+            values,
+            baseline,
+            k,
+            change_count,
+            baseline_totals,
+            groups=groups,
+            group_cap=group_cap,
+        )
+        points.append(FrontierPoint(change_count, improvement, selected, feasible))
+    return points
+
+
+def _solve_exact_change_count(
+    values: np.ndarray,
+    baseline: np.ndarray,
+    budget: int,
+    change_count: int,
+    baseline_totals: np.ndarray,
+    *,
+    groups: np.ndarray | None,
+    group_cap: int | None,
+) -> tuple[np.ndarray, float, bool]:
+    """Solve one exact-change-count paired maximin problem."""
+    n, scenario_count = values.shape
+    if change_count < 0 or change_count > 2 * budget:
+        return np.empty(0, dtype=int), float("-inf"), False
+    try:
+        from scipy.optimize import Bounds, LinearConstraint, milp
+
+        objective = np.zeros(n + 1)
+        objective[-1] = -1.0
+        rows: list[np.ndarray] = []
+        lower: list[float] = []
+        upper: list[float] = []
+        budget_row = np.zeros(n + 1)
+        budget_row[:n] = 1.0
+        rows.append(budget_row)
+        lower.append(-np.inf)
+        upper.append(float(budget))
+        # C(x,b) = |b| + sum_{b_a=0}x_a - sum_{b_a=1}x_a.
+        change_row = np.zeros(n + 1)
+        change_row[:n] = 1.0
+        change_row[baseline] = -1.0
+        rows.append(change_row)
+        lower.append(float(change_count - len(baseline)))
+        upper.append(float(change_count - len(baseline)))
+        for scenario in range(scenario_count):
+            row = np.zeros(n + 1)
+            row[:n] = -values[:, scenario]
+            row[-1] = 1.0
+            rows.append(row)
+            lower.append(-np.inf)
+            upper.append(float(-baseline_totals[scenario]))
+        if groups is not None and group_cap is not None:
+            group_array = np.asarray(groups)
+            for group in pd.unique(group_array):
+                row = np.zeros(n + 1)
+                row[:n] = (group_array == group).astype(float)
+                rows.append(row)
+                lower.append(-np.inf)
+                upper.append(float(group_cap))
+        result = milp(
+            c=objective,
+            integrality=np.r_[np.ones(n, dtype=int), 0],
+            bounds=Bounds(np.r_[np.zeros(n), -np.inf], np.r_[np.ones(n), np.inf]),
+            constraints=LinearConstraint(np.vstack(rows), np.asarray(lower), np.asarray(upper)),
+            options={"mip_rel_gap": 1e-9, "time_limit": 30.0},
+        )
+        if result.success and result.x is not None:
+            selected = np.flatnonzero(result.x[:n] > 0.5).astype(int)
+            totals = values[selected].sum(axis=0) - baseline_totals if len(selected) else -baseline_totals
+            return selected, float(np.min(totals)), True
+    except Exception:
+        pass
+    return np.empty(0, dtype=int), float("-inf"), False
 
 
 def score_plan_select(
