@@ -39,6 +39,16 @@ Place source records under `data/open/bts`, `data/open/road`, and `data/open/div
 
 ## Smoke tests
 
+Check the grouped robust-rounding construction on a small instance:
+
+~~~bash
+python src/methodology/test_matroid_rounding_smoke.py
+~~~
+
+The check solves a fractional robust plan, decomposes it into feasible integer
+plans, verifies every total and area limit, and compares sampled plan values
+with the enumerated integer optimum.
+
 Run one ordered fold with at most 2,500 records per period before a full analysis:
 
 ```bash
