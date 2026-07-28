@@ -51,6 +51,17 @@ python src/methodology/run_structural_robust.py \
 
 Repeat with `--dataset road` and `--dataset divvy` and their prepared input files. A valid smoke test reports zero negative responses, zero responses above service loss, feasible plans, and zero reported mixed-integer solver gap.
 
+The replay inputs can also be checked without fitting a response model:
+
+```bash
+python src/methodology/validate_structural_replay.py \
+  --dataset bts \
+  --input data/open/bts/ccerts_bts_ready_v2.csv \
+  --output results/replay_validation/bts.csv
+```
+
+Repeat the command for the roadway and shared-mobility inputs. The output records response boundaries and domain-specific physical input checks.
+
 ## Full rolling analyses
 
 ```bash
@@ -68,6 +79,8 @@ python src/methodology/run_structural_robust.py --dataset divvy \
 ```
 
 The program keeps model fitting, mechanism tuning, response-representation selection, plan calibration, and testing in calendar order. Every decision rule receives the same action limit and area limit.
+
+The result tables include the paired improvement over the feasible loss-priority plan, the number of changed actions, and the supported per-action model-discrepancy tolerance. The summary program calculates a capacity-level release rule from earlier paired blocks and applies it to the later evaluation period.
 
 ## Summaries and figures
 

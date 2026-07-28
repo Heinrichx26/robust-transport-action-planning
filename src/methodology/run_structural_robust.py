@@ -15,7 +15,10 @@ from ccerts.pipeline import prepare_features, sample_frame, valid_periods
 from ccerts.run_rolling_origin import build_folds, ensure_block_id, period_slice
 from ccerts.transparent_methods import fit_method_family, method_score_columns
 from methodology.structural_robust import (
+    anchored_robust_plan_select,
+    contamination_robust_values,
     fit_low_rank_scenario_model,
+    paired_plan_values,
     plan_values,
     robust_plan_select,
     scenario_gain_matrix,
@@ -34,6 +37,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--alpha", type=float, default=0.10)
     parser.add_argument("--certificate-alpha", type=float, default=0.05)
     parser.add_argument("--adaptation-rate", type=float, default=0.10)
+    parser.add_argument("--contamination", type=float, default=0.20)
     parser.add_argument("--seed", type=int, default=20260724)
     return parser.parse_args()
 
@@ -120,6 +124,7 @@ def main() -> None:
                 validation_candidates,
                 y_future[:representation_n],
                 budget,
+                contamination=args.contamination,
             )
         robust_by_budget = {budget: deployment_candidates[selected_candidate[budget]] for budget in budgets}
         pred["_deployment_row"] = np.arange(len(pred))
@@ -139,6 +144,7 @@ def main() -> None:
             y_deployment[:split],
             budgets,
             method_score_columns(),
+            contamination=args.contamination,
         )
         test_rows = _evaluate_partition(
             args.dataset,
@@ -150,6 +156,7 @@ def main() -> None:
             y_deployment[split:],
             budgets,
             method_score_columns(),
+            contamination=args.contamination,
         )
         result_rows.extend(correction_rows)
         result_rows.extend(test_rows)
@@ -160,29 +167,43 @@ def main() -> None:
             cal_ours = cal_frame[(cal_frame["method"] == "StructuralRobust") & (cal_frame["budget_fraction"] == budget)]
             test_ours = test_frame[(test_frame["method"] == "StructuralRobust") & (test_frame["budget_fraction"] == budget)]
             residual = list((
+                cal_ours["predicted_paired_margin"].to_numpy(dtype=float)
+                - cal_ours["realized_paired_margin"].to_numpy(dtype=float)
+            ) / np.maximum(np.sqrt(cal_ours["changed_actions"].to_numpy(dtype=float)), 1.0))
+            absolute_residual = list((
                 cal_ours["predicted_worst_value"].to_numpy(dtype=float)
                 - cal_ours["realized_worst_value"].to_numpy(dtype=float)
             ) / np.maximum(np.sqrt(cal_ours["selected_n"].to_numpy(dtype=float)), 1.0))
             adaptive_alpha = float(args.certificate_alpha)
+            absolute_adaptive_alpha = float(args.certificate_alpha)
             for _, row in test_ours.sort_values("block_id").iterrows():
                 q = _finite_quantile(np.asarray(residual), 1.0 - adaptive_alpha)
-                scale = max(np.sqrt(row["selected_n"]), 1.0)
-                lower = 0.0 if np.isposinf(q) else max(
-                    0.0,
-                    float(row["predicted_worst_value"]) - q * scale,
+                scale = max(np.sqrt(row["changed_actions"]), 1.0)
+                lower = -np.inf if np.isposinf(q) else float(row["predicted_paired_margin"]) - q * scale
+                covered = float(row["realized_paired_margin"] >= lower - 1e-9)
+                switched = float(lower > 0.0)
+                q_absolute = _finite_quantile(np.asarray(absolute_residual), 1.0 - absolute_adaptive_alpha)
+                absolute_scale = max(np.sqrt(row["selected_n"]), 1.0)
+                absolute_lower = 0.0 if np.isposinf(q_absolute) else max(
+                    0.0, float(row["predicted_worst_value"]) - q_absolute * absolute_scale
                 )
-                covered = float(row["realized_worst_value"] >= lower - 1e-9)
+                absolute_covered = float(row["realized_worst_value"] >= absolute_lower - 1e-9)
                 coverage_rows.append(
                     {
                         "dataset": args.dataset,
                         "fold_id": fold_id,
                         "budget_fraction": budget,
                         "block_id": row["block_id"],
-                        "calibrated_plan_lower_bound": lower,
-                        "realized_worst_value": row["realized_worst_value"],
+                        "calibrated_paired_margin_lower_bound": lower,
+                        "realized_paired_margin": row["realized_paired_margin"],
                         "covered": covered,
+                        "absolute_plan_lower_bound": absolute_lower,
+                        "realized_worst_value": row["realized_worst_value"],
+                        "absolute_covered": absolute_covered,
+                        "certified_switch": switched,
                         "calibration_blocks": float(len(residual)),
                         "adaptive_alpha": adaptive_alpha,
+                        "absolute_adaptive_alpha": absolute_adaptive_alpha,
                         "target_alpha": float(args.certificate_alpha),
                         "adaptation_rate": float(args.adaptation_rate),
                     }
@@ -191,10 +212,32 @@ def main() -> None:
                 adaptive_alpha += float(args.adaptation_rate) * (
                     float(args.certificate_alpha) - miss
                 )
+                absolute_adaptive_alpha += float(args.adaptation_rate) * (
+                    float(args.certificate_alpha) - (1.0 - absolute_covered)
+                )
                 residual.append(
-                    (float(row["predicted_worst_value"]) - float(row["realized_worst_value"]))
+                    (float(row["predicted_paired_margin"]) - float(row["realized_paired_margin"]))
                     / scale
                 )
+                absolute_residual.append(
+                    (float(row["predicted_worst_value"]) - float(row["realized_worst_value"]))
+                    / absolute_scale
+                )
+                risk_row = test_frame.loc[
+                    (test_frame["method"] == "RiskFirst")
+                    & (test_frame["budget_fraction"] == budget)
+                    & (test_frame["block_id"] == row["block_id"])
+                ].iloc[0].to_dict()
+                policy_row = row.to_dict() if switched else risk_row
+                policy_row.update(
+                    {
+                        "method": "CertifiedSwitch",
+                        "certified_switch": switched,
+                        "calibrated_paired_margin_lower_bound": lower,
+                        "realized_paired_margin": float(row["realized_paired_margin"]) if switched else 0.0,
+                    }
+                )
+                result_rows.append(policy_row)
 
         diagnostic_rows.append(
             {
@@ -208,6 +251,7 @@ def main() -> None:
                 "scenario_count": len(scenario_names),
                 "response_rank": prediction.rank,
                 "joint_scenario_correction": prediction.joint_correction,
+                "contamination_share": float(args.contamination),
                 "selected_candidates": ";".join(
                     f"{int(round(100 * budget))}:{selected_candidate[budget]}" for budget in budgets
                 ),
@@ -253,6 +297,8 @@ def _evaluate_partition(
     realized_scenarios: np.ndarray,
     budgets: list[float],
     published_scores: dict[str, str],
+    *,
+    contamination: float,
 ) -> list[dict[str, float | str]]:
     rows: list[dict[str, float | str]] = []
     for block_id, block in frame.groupby("block_id", sort=True):
@@ -264,9 +310,20 @@ def _evaluate_partition(
             budget = max(1, int(round(len(block) * budget_fraction)))
             group_cap = _area_cap(budget)
             robust_s = robust_scenarios_by_budget[budget_fraction][loc]
-            robust = robust_plan_select(robust_s, budget, groups=groups, group_cap=group_cap)
+            robust_target = contamination_robust_values(robust_s, contamination)
+            realized_target = contamination_robust_values(real_s, contamination)
+            risk_selected = score_plan_select(
+                block[published_scores["RiskFirst"]].to_numpy(dtype=float),
+                budget,
+                groups=groups,
+                group_cap=group_cap,
+            )
+            robust = robust_plan_select(
+                robust_s, budget, groups=groups, group_cap=group_cap
+            )
             selections: dict[str, np.ndarray] = {
                 "StructuralRobust": robust.selected,
+                "RiskFirst": risk_selected,
                 "ExpectedActionValue": score_plan_select(
                     np.mean(pred_s, axis=1), budget, groups=groups, group_cap=group_cap
                 ),
@@ -281,13 +338,26 @@ def _evaluate_partition(
                 ),
             }
             for method, column in published_scores.items():
-                if column in block.columns and method != "C-CERTS":
+                if column in block.columns and method not in {"C-CERTS", "RiskFirst"}:
                     selections[method] = score_plan_select(
                         block[column].to_numpy(dtype=float), budget, groups=groups, group_cap=group_cap
                     )
             for method, selected in selections.items():
                 realized = plan_values(real_s, selected)
                 predicted = plan_values(robust_s if method == "StructuralRobust" else pred_s, selected)
+                predicted_target = robust_target if method == "StructuralRobust" else contamination_robust_values(pred_s, contamination)
+                predicted_pair = paired_plan_values(
+                    predicted_target,
+                    selected,
+                    risk_selected,
+                )
+                realized_pair = paired_plan_values(realized_target, selected, risk_selected)
+                changed_actions = int(len(np.setxor1d(selected, risk_selected)))
+                predicted_tolerance = (
+                    max(predicted_pair["worst"], 0.0) / changed_actions
+                    if changed_actions > 0
+                    else np.inf
+                )
                 rows.append(
                     {
                         "dataset": dataset,
@@ -301,6 +371,12 @@ def _evaluate_partition(
                         "realized_worst_value": realized["worst"],
                         "realized_mean_value": realized["mean"],
                         "realized_scenario_spread": realized["spread"],
+                        "predicted_paired_margin": predicted_pair["worst"],
+                        "realized_paired_margin": realized_pair["worst"],
+                        "realized_paired_mean": realized_pair["mean"],
+                        "changed_actions": float(changed_actions),
+                        "realized_dominance": float(realized_pair["worst"] >= -1e-9),
+                        "predicted_discrepancy_tolerance": predicted_tolerance,
                         "solver_gap": robust.gap if method == "StructuralRobust" else np.nan,
                         "feasible": 1.0,
                     }
@@ -342,6 +418,8 @@ def _select_scenario_candidate(
     candidates: dict[str, np.ndarray],
     realized_scenarios: np.ndarray,
     budget_fraction: float,
+    *,
+    contamination: float,
 ) -> str:
     best_name = "direct"
     best_value = -np.inf
@@ -351,6 +429,12 @@ def _select_scenario_candidate(
             loc = block.index.to_numpy() - frame.index.min()
             budget = max(1, int(round(len(block) * budget_fraction)))
             groups = block["group"].astype(str).to_numpy()
+            baseline = score_plan_select(
+                block["score_risk_first"].to_numpy(dtype=float),
+                budget,
+                groups=groups,
+                group_cap=_area_cap(budget),
+            )
             selected = robust_plan_select(
                 matrix[loc], budget, groups=groups, group_cap=_area_cap(budget)
             ).selected

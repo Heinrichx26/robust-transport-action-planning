@@ -27,6 +27,17 @@ class PlanSolution:
     gap: float
 
 
+@dataclass(frozen=True)
+class AnchoredPlanSolution:
+    selected: np.ndarray
+    baseline: np.ndarray
+    predicted_worst_improvement: float
+    changed_actions: int
+    feasible: bool
+    solver: str
+    gap: float
+
+
 def scenario_gain_matrix(dataset: str, frame: pd.DataFrame) -> tuple[tuple[str, ...], np.ndarray]:
     """Return loss reductions under every predeclared structural setting."""
     loss = _num(frame, "loss")
@@ -71,6 +82,25 @@ def scenario_gain_matrix(dataset: str, frame: pd.DataFrame) -> tuple[tuple[str, 
     matrix = np.column_stack(values)
     matrix = np.clip(matrix, 0.0, np.maximum(loss[:, None], 0.0))
     return tuple(names), matrix
+
+
+def contamination_robust_values(
+    scenario_values: np.ndarray,
+    contamination: float,
+) -> np.ndarray:
+    """Represent a contamination ambiguity set by its extreme distributions.
+
+    The centre assigns equal mass to the declared structural settings. A share
+    ``contamination`` may move to any one setting. Applying a plan selector to
+    the returned columns therefore maximises the worst expected value over all
+    extreme distributions of this ambiguity set.
+    """
+    values = np.asarray(scenario_values, dtype=float)
+    eta = float(contamination)
+    if not 0.0 <= eta <= 1.0:
+        raise ValueError("contamination must lie in [0, 1].")
+    centre = np.mean(values, axis=1, keepdims=True)
+    return (1.0 - eta) * centre + eta * values
 
 
 def fit_low_rank_scenario_model(
@@ -204,6 +234,122 @@ def robust_plan_select(
     return PlanSolution(selected, value, True, "pointwise-lower fallback", np.nan)
 
 
+def anchored_robust_plan_select(
+    scenario_values: np.ndarray,
+    baseline: np.ndarray,
+    budget: int,
+    *,
+    groups: np.ndarray | None = None,
+    group_cap: int | None = None,
+    discrepancy_penalty: float = 0.0,
+) -> AnchoredPlanSolution:
+    """Maximise certified improvement over a feasible baseline plan."""
+    values = np.maximum(np.asarray(scenario_values, dtype=float), 0.0)
+    n, scenario_count = values.shape
+    baseline = np.unique(np.asarray(baseline, dtype=int))
+    if np.any((baseline < 0) | (baseline >= n)):
+        raise ValueError("Baseline indices must refer to rows of scenario_values.")
+    k = min(max(int(budget), 0), n)
+    penalty = max(float(discrepancy_penalty), 0.0)
+    if len(baseline) > k:
+        raise ValueError("The baseline plan exceeds the action budget.")
+    if groups is not None and group_cap is not None:
+        group_array = np.asarray(groups)
+        baseline_counts = pd.Series(group_array[baseline]).value_counts()
+        if len(baseline_counts) and int(baseline_counts.max()) > int(group_cap):
+            raise ValueError("The baseline plan exceeds a group limit.")
+    if k == 0 or n == 0:
+        return AnchoredPlanSolution(
+            np.empty(0, dtype=int), baseline, 0.0, 0, True, "empty plan", 0.0
+        )
+
+    baseline_totals = values[baseline].sum(axis=0) if len(baseline) else np.zeros(scenario_count)
+    if np.allclose(values, values[:, [0]], rtol=1e-10, atol=1e-12):
+        adjusted_score = values[:, 0] - penalty
+        adjusted_score[baseline] = values[baseline, 0] + penalty
+        selected = score_plan_select(adjusted_score, k, groups=groups, group_cap=group_cap)
+        improvement = float(
+            values[selected, 0].sum()
+            - baseline_totals[0]
+            - penalty * symmetric_difference_count(selected, baseline)
+        )
+        return AnchoredPlanSolution(
+            selected,
+            baseline,
+            improvement,
+            symmetric_difference_count(selected, baseline),
+            True,
+            "exact sorting for a common response",
+            0.0,
+        )
+
+    try:
+        from scipy.optimize import Bounds, LinearConstraint, milp
+
+        # Variables are x_1,...,x_n,z. Each scenario constrains z by the
+        # improvement of x over the fixed baseline plan.
+        objective = np.zeros(n + 1)
+        objective[-1] = -1.0
+        rows: list[np.ndarray] = []
+        lower: list[float] = []
+        upper: list[float] = []
+        budget_row = np.zeros(n + 1)
+        budget_row[:n] = 1.0
+        rows.append(budget_row)
+        lower.append(-np.inf)
+        upper.append(float(k))
+        for scenario in range(scenario_count):
+            row = np.zeros(n + 1)
+            row[:n] = -values[:, scenario]
+            change_coefficients = np.ones(n)
+            change_coefficients[baseline] = -1.0
+            row[:n] += penalty * change_coefficients
+            row[-1] = 1.0
+            rows.append(row)
+            lower.append(-np.inf)
+            upper.append(float(-baseline_totals[scenario] - penalty * len(baseline)))
+        if groups is not None and group_cap is not None:
+            group_array = np.asarray(groups)
+            for group in pd.unique(group_array):
+                row = np.zeros(n + 1)
+                row[:n] = (group_array == group).astype(float)
+                rows.append(row)
+                lower.append(-np.inf)
+                upper.append(float(group_cap))
+        constraints = LinearConstraint(np.vstack(rows), np.asarray(lower), np.asarray(upper))
+        lb = np.r_[np.zeros(n), -np.inf]
+        ub = np.r_[np.ones(n), np.inf]
+        result = milp(
+            c=objective,
+            integrality=np.r_[np.ones(n, dtype=int), 0],
+            bounds=Bounds(lb, ub),
+            constraints=constraints,
+            options={"mip_rel_gap": 1e-6, "time_limit": 30.0},
+        )
+        if result.success and result.x is not None:
+            selected = np.flatnonzero(result.x[:n] > 0.5)
+            improvement = (
+                paired_plan_values(values, selected, baseline)["worst"]
+                - penalty * symmetric_difference_count(selected, baseline)
+            )
+            return AnchoredPlanSolution(
+                selected,
+                baseline,
+                improvement,
+                symmetric_difference_count(selected, baseline),
+                True,
+                "mixed-integer anchored robust epigraph",
+                float(getattr(result, "mip_gap", 0.0) or 0.0),
+            )
+    except Exception:
+        pass
+
+    # The baseline is always a valid zero-improvement fallback.
+    return AnchoredPlanSolution(
+        baseline.copy(), baseline, 0.0, 0, True, "feasible baseline fallback", np.nan
+    )
+
+
 def score_plan_select(
     scores: np.ndarray,
     budget: int,
@@ -235,6 +381,28 @@ def plan_values(scenario_values: np.ndarray, selected: np.ndarray) -> dict[str, 
         "mean": float(np.mean(totals)),
         "spread": float(np.max(totals) - np.min(totals)),
     }
+
+
+def paired_plan_values(
+    scenario_values: np.ndarray,
+    selected: np.ndarray,
+    baseline: np.ndarray,
+) -> dict[str, float]:
+    """Return scenario-wise value differences between two plans."""
+    values = np.asarray(scenario_values, dtype=float)
+    selected_totals = values[np.asarray(selected, dtype=int)].sum(axis=0) if len(selected) else np.zeros(values.shape[1])
+    baseline_totals = values[np.asarray(baseline, dtype=int)].sum(axis=0) if len(baseline) else np.zeros(values.shape[1])
+    differences = selected_totals - baseline_totals
+    return {
+        "worst": float(np.min(differences)),
+        "mean": float(np.mean(differences)),
+        "spread": float(np.max(differences) - np.min(differences)),
+    }
+
+
+def symmetric_difference_count(first: np.ndarray, second: np.ndarray) -> int:
+    """Count actions that appear in exactly one of two plans."""
+    return int(len(np.setxor1d(np.asarray(first, dtype=int), np.asarray(second, dtype=int))))
 
 
 def _num(frame: pd.DataFrame, column: str, default: float = 0.0) -> np.ndarray:

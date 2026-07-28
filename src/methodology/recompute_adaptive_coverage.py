@@ -37,45 +37,71 @@ def recompute(dataset_dir: Path, target_alpha: float, adaptation_rate: float) ->
         deployment = frame.loc[frame["partition"].eq("test")].sort_values("block_id")
         residuals = list(
             (
+                calibration["predicted_paired_margin"].to_numpy(dtype=float)
+                - calibration["realized_paired_margin"].to_numpy(dtype=float)
+            )
+            / np.maximum(np.sqrt(calibration["changed_actions"].to_numpy(dtype=float)), 1.0)
+        )
+        absolute_residuals = list(
+            (
                 calibration["predicted_worst_value"].to_numpy(dtype=float)
                 - calibration["realized_worst_value"].to_numpy(dtype=float)
             )
             / np.maximum(np.sqrt(calibration["selected_n"].to_numpy(dtype=float)), 1.0)
         )
         adaptive_alpha = float(target_alpha)
+        absolute_adaptive_alpha = float(target_alpha)
         for _, row in deployment.iterrows():
             q = finite_quantile(residuals, 1.0 - adaptive_alpha)
-            scale = max(np.sqrt(float(row["selected_n"])), 1.0)
-            lower = 0.0 if np.isposinf(q) else max(
-                0.0,
-                float(row["predicted_worst_value"]) - q * scale,
+            scale = max(np.sqrt(float(row["changed_actions"])), 1.0)
+            lower = -np.inf if np.isposinf(q) else float(row["predicted_paired_margin"]) - q * scale
+            covered = float(float(row["realized_paired_margin"]) >= lower - 1e-9)
+            switched = float(lower > 0.0)
+            q_absolute = finite_quantile(absolute_residuals, 1.0 - absolute_adaptive_alpha)
+            absolute_scale = max(np.sqrt(float(row["selected_n"])), 1.0)
+            absolute_lower = 0.0 if np.isposinf(q_absolute) else max(
+                0.0, float(row["predicted_worst_value"]) - q_absolute * absolute_scale
             )
-            covered = float(float(row["realized_worst_value"]) >= lower - 1e-9)
+            absolute_covered = float(float(row["realized_worst_value"]) >= absolute_lower - 1e-9)
             rows.append(
                 {
                     "dataset": row["dataset"],
                     "fold_id": fold_id,
                     "budget_fraction": budget,
                     "block_id": row["block_id"],
-                    "calibrated_plan_lower_bound": lower,
-                    "realized_worst_value": row["realized_worst_value"],
+                    "calibrated_paired_margin_lower_bound": lower,
+                    "realized_paired_margin": row["realized_paired_margin"],
                     "covered": covered,
+                    "absolute_plan_lower_bound": absolute_lower,
+                    "realized_worst_value": row["realized_worst_value"],
+                    "absolute_covered": absolute_covered,
+                    "certified_switch": switched,
                     "calibration_blocks": float(len(residuals)),
                     "adaptive_alpha": adaptive_alpha,
+                    "absolute_adaptive_alpha": absolute_adaptive_alpha,
                     "target_alpha": target_alpha,
                     "adaptation_rate": adaptation_rate,
                 }
             )
             miss = 1.0 - covered
             adaptive_alpha += adaptation_rate * (target_alpha - miss)
+            absolute_adaptive_alpha += adaptation_rate * (
+                target_alpha - (1.0 - absolute_covered)
+            )
             residuals.append(
-                (float(row["predicted_worst_value"]) - float(row["realized_worst_value"]))
+                (float(row["predicted_paired_margin"]) - float(row["realized_paired_margin"]))
                 / scale
+            )
+            absolute_residuals.append(
+                (float(row["predicted_worst_value"]) - float(row["realized_worst_value"]))
+                / absolute_scale
             )
     coverage = pd.DataFrame(rows)
     coverage.to_csv(tables / "plan_coverage.csv", index=False)
     summary = coverage.groupby(["dataset", "budget_fraction"], as_index=False).agg(
-        coverage=("covered", "mean"),
+        paired_coverage=("covered", "mean"),
+        absolute_coverage=("absolute_covered", "mean"),
+        certified_switch_rate=("certified_switch", "mean"),
         blocks=("covered", "size"),
     )
     summary.to_csv(tables / "plan_coverage_summary.csv", index=False)

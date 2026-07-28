@@ -37,6 +37,10 @@ def main() -> None:
         [pd.read_csv(root / dataset / "tables" / "plan_coverage.csv") for dataset in DATASETS],
         ignore_index=True,
     )
+    coverage["paired_lower_is_finite"] = np.isfinite(
+        coverage["calibrated_paired_margin_lower_bound"].to_numpy(float)
+    ).astype(float)
+    coverage.loc[~np.isfinite(coverage["calibrated_paired_margin_lower_bound"]), "calibrated_paired_margin_lower_bound"] = np.nan
     test = plans[plans["partition"] == "test"].copy()
     tests = paired_tests(test)
     tests.to_csv(out / "paired_method_tests.csv", index=False)
@@ -45,18 +49,93 @@ def main() -> None:
     coverage_summary = (
         coverage.groupby(["dataset", "budget_fraction"], as_index=False)
         .agg(
-            coverage=("covered", "mean"),
+            paired_coverage=("covered", "mean"),
+            absolute_coverage=("absolute_covered", "mean"),
             blocks=("covered", "size"),
-            mean_lower_bound=("calibrated_plan_lower_bound", "mean"),
+            certified_switch_rate=("certified_switch", "mean"),
+            finite_paired_lower_rate=("paired_lower_is_finite", "mean"),
+            mean_paired_lower_bound=("calibrated_paired_margin_lower_bound", "mean"),
+            mean_realized_paired_margin=("realized_paired_margin", "mean"),
+            mean_absolute_lower_bound=("absolute_plan_lower_bound", "mean"),
             mean_realized_worst=("realized_worst_value", "mean"),
         )
     )
-    coverage_summary["retained_share"] = coverage_summary["mean_lower_bound"] / np.maximum(
+    coverage_summary["absolute_retained_share"] = coverage_summary["mean_absolute_lower_bound"] / np.maximum(
         coverage_summary["mean_realized_worst"], 1e-12
     )
     coverage_summary.to_csv(out / "coverage_summary.csv", index=False)
+    capacity_policy = build_capacity_policy(plans)
+    capacity_policy.to_csv(out / "capacity_level_switching.csv", index=False)
+    action_certificate = build_action_certificate_summary(plans, capacity_policy)
+    action_certificate.to_csv(out / "action_certificate_summary.csv", index=False)
     print(main_table.to_string(index=False))
     print(coverage_summary.to_string(index=False))
+    print(capacity_policy.to_string(index=False))
+    print(action_certificate.to_string(index=False))
+
+
+def build_capacity_policy(plans: pd.DataFrame) -> pd.DataFrame:
+    """Choose a capacity-level policy from earlier paired block margins."""
+    rng = np.random.default_rng(20260728)
+    rows: list[dict[str, float | str]] = []
+    proposed = plans[plans["method"].eq("StructuralRobust")]
+    for (dataset, budget), frame in proposed.groupby(["dataset", "budget_fraction"]):
+        calibration = frame[frame["partition"].eq("set_cal")]["realized_paired_margin"].to_numpy(float)
+        test_margin = frame[frame["partition"].eq("test")]["realized_paired_margin"].to_numpy(float)
+        if len(calibration) == 0 or len(test_margin) == 0:
+            continue
+        bootstrap_mean = np.mean(
+            rng.choice(calibration, size=(10000, len(calibration)), replace=True), axis=1
+        )
+        lower = float(np.quantile(bootstrap_mean, 0.05))
+        switched = float(lower > 0.0)
+        rows.append(
+            {
+                "dataset": dataset,
+                "budget_fraction": budget,
+                "calibration_mean_paired_margin": float(np.mean(calibration)),
+                "one_sided_95_lower_limit": lower,
+                "use_structural_plan": switched,
+                "test_mean_paired_margin": float(np.mean(test_margin)),
+                "issued_test_mean_paired_margin": switched * float(np.mean(test_margin)),
+                "calibration_blocks": float(len(calibration)),
+                "test_blocks": float(len(test_margin)),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def build_action_certificate_summary(
+    plans: pd.DataFrame,
+    capacity_policy: pd.DataFrame,
+) -> pd.DataFrame:
+    proposed = plans[
+        plans["method"].eq("StructuralRobust") & plans["partition"].eq("test")
+    ].copy()
+    proposed.loc[
+        ~np.isfinite(proposed["predicted_discrepancy_tolerance"]),
+        "predicted_discrepancy_tolerance",
+    ] = np.nan
+    summary = proposed.groupby(["dataset", "budget_fraction"], as_index=False).agg(
+        mean_paired_margin=("realized_paired_margin", "mean"),
+        paired_dominance_rate=("realized_dominance", "mean"),
+        mean_changed_actions=("changed_actions", "mean"),
+        median_discrepancy_tolerance=("predicted_discrepancy_tolerance", "median"),
+        test_blocks=("block_id", "size"),
+    )
+    return summary.merge(
+        capacity_policy[
+            [
+                "dataset",
+                "budget_fraction",
+                "one_sided_95_lower_limit",
+                "use_structural_plan",
+                "issued_test_mean_paired_margin",
+            ]
+        ],
+        on=["dataset", "budget_fraction"],
+        how="left",
+    )
 
 
 def paired_tests(test: pd.DataFrame) -> pd.DataFrame:
@@ -117,6 +196,7 @@ def build_main_table(test: pd.DataFrame, tests: pd.DataFrame) -> pd.DataFrame:
         frontier_values = {method: float(row[method]) for method in FRONTIER if method in row}
         strongest_name = max(frontier_values, key=frontier_values.get)
         strongest_value = frontier_values[strongest_name]
+        switch_value = float(row["CertifiedSwitch"]) if "CertifiedSwitch" in row else risk
         risk_test = tests[
             (tests["dataset"] == dataset)
             & (tests["budget_fraction"] == budget)
@@ -128,6 +208,7 @@ def build_main_table(test: pd.DataFrame, tests: pd.DataFrame) -> pd.DataFrame:
                 "budget_fraction": budget,
                 "ours_worst_value": ours,
                 "gain_over_loss_priority_pct": 100.0 * (ours - risk) / max(risk, 1e-12),
+                "certified_policy_gain_pct": 100.0 * (switch_value - risk) / max(risk, 1e-12),
                 "risk_holm_p": risk_test.get("holm_p", np.nan),
                 "strongest_frontier_method": strongest_name,
                 "gain_over_strongest_frontier_pct": 100.0 * (ours - strongest_value) / max(strongest_value, 1e-12),
